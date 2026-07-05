@@ -1,0 +1,13 @@
+.git
+.venv
+.pytest_cache
+.mypy_cache
+.ruff_cache
+__pycache__
+*.pyc
+tmp
+document-cache
+sample-auctions-2026.xlsx
+procurement_autofill.egg-info
+secrets
+

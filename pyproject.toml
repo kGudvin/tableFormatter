@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "procurement-autofill"
+version = "0.1.0"
+description = "Фоновое заполнение результатов закупок 44-ФЗ в Google Sheets"
+requires-python = ">=3.12"
+dependencies = [
+  "alembic==1.16.2",
+  "apscheduler==3.11.0",
+  "asyncpg==0.30.0",
+  "certifi==2026.6.17",
+  "fastapi==0.115.14",
+  "google-api-python-client==2.174.0",
+  "google-auth==2.40.3",
+  "httpx==0.28.1",
+  "lxml==6.1.1",
+  "openpyxl==3.1.5",
+  "pydantic==2.11.7",
+  "pydantic-settings==2.10.1",
+  "pypdf==5.7.0",
+  "python-docx==1.2.0",
+  "python-multipart==0.0.20",
+  "SQLAlchemy==2.0.41",
+  "structlog==25.4.0",
+  "uvicorn==0.35.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy==1.16.1",
+  "pytest==8.4.1",
+  "pytest-asyncio==1.0.0",
+  "ruff==0.12.2",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC", "SIM"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["sqlalchemy.ext.mypy.plugin"]
+exclude = ["migrations/"]
+
+[[tool.mypy.overrides]]
+module = [
+  "apscheduler.*",
+  "googleapiclient.*",
+  "lxml.*",
+  "openpyxl.*",
+]
+ignore_missing_imports = true
+disable_error_code = ["no-untyped-call"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+  "integration: tests using database or external-like clients",
+]
