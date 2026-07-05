@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from html import escape
@@ -14,7 +15,7 @@ from app.config import get_settings
 from app.db.models import ProcessingRun
 from app.db.session import make_session_factory
 from app.domain.products import format_products
-from app.review.sync import sync_review_sheet
+from app.review.sync import publish_open_reviews, sync_review_sheet
 from app.services.processor import ProcurementProcessor
 from app.sheets.client import (
     GoogleSheetsClient,
@@ -75,8 +76,35 @@ async def dashboard(request: Request, message: str | None = None) -> HTMLRespons
                 <button type="submit">▶ Выполнить</button>
               </form>
             </section>
+            <section class="panel">
+              <h2>Ручная обработка</h2>
+              <form class="range-form" method="post" action="/ui/actions/process-range">
+                <input name="start_row" type="number" min="1" placeholder="Строка с" required>
+                <input name="end_row" type="number" min="1" placeholder="Строка по" required>
+                <label class="switch"><input type="checkbox" name="force" value="1"><span></span>Перепроверить заполненные</label>
+                <button type="submit">▶ Запустить диапазон</button>
+              </form>
+              <form class="numbers-form" method="post" action="/ui/actions/process-numbers">
+                <textarea name="purchase_numbers" placeholder="Номера закупок через пробел, запятую или с новой строки" required></textarea>
+                <label class="switch"><input type="checkbox" name="force" value="1" checked><span></span>Перепроверить найденные</label>
+                <button type="submit">▶ Запустить номера</button>
+              </form>
+            </section>
             {_processing_status_panel(job_snapshot, latest_run)}
             """,
+        )
+    )
+
+
+@router.get("/help", response_class=HTMLResponse)
+async def help_page(request: Request) -> HTMLResponse:
+    settings = get_settings()
+    require_web_auth(request, settings)
+    return HTMLResponse(
+        _page(
+            title="Справка",
+            active="help",
+            body=_help_body(),
         )
     )
 
@@ -150,10 +178,14 @@ async def _run_background_processing() -> None:
 
 
 def _start_background_processing() -> None:
+    _start_background_job(_run_background_processing())
+
+
+def _start_background_job(coro: Any) -> None:
     global _background_started_at, _background_task, _background_error
     _background_started_at = datetime.now(UTC)
     _background_error = None
-    _background_task = asyncio.create_task(_run_background_processing())
+    _background_task = asyncio.create_task(coro)
     _background_task.add_done_callback(_store_background_exception)
 
 
@@ -179,8 +211,75 @@ async def sync_review(request: Request) -> RedirectResponse:
     settings = get_settings()
     require_web_auth(request, settings)
     async with make_session_factory(settings.database_url)() as session:
-        count = await sync_review_sheet(session, _sheets_client(), settings.google_review_sheet)
-    return _redirect(f"Закрыто проверок: {count}.")
+        client = _sheets_client()
+        published = await publish_open_reviews(session, client, settings.google_review_sheet)
+        closed = await sync_review_sheet(session, client, settings.google_review_sheet)
+    return _redirect(f"Добавлено проверок: {published}. Закрыто проверок: {closed}.")
+
+
+@router.post("/actions/process-range")
+async def process_range(
+    request: Request,
+    start_row: int = Form(...),
+    end_row: int = Form(...),
+    force: str | None = Form(None),
+) -> RedirectResponse:
+    settings = get_settings()
+    require_web_auth(request, settings)
+    if _job_snapshot().running:
+        return _redirect("Обработка уже идет. Дождитесь завершения текущего запуска.")
+    if start_row < 1 or end_row < 1:
+        return _redirect("Номера строк должны быть больше нуля.")
+    _start_background_job(_run_range_processing(start_row, end_row, force=bool(force)))
+    lower, upper = sorted((start_row, end_row))
+    return _redirect(f"Запущена обработка строк {lower}-{upper}.")
+
+
+@router.post("/actions/process-numbers")
+async def process_numbers(
+    request: Request,
+    purchase_numbers: str = Form(...),
+    force: str | None = Form(None),
+) -> RedirectResponse:
+    settings = get_settings()
+    require_web_auth(request, settings)
+    if _job_snapshot().running:
+        return _redirect("Обработка уже идет. Дождитесь завершения текущего запуска.")
+    numbers = _parse_purchase_numbers(purchase_numbers)
+    if not numbers:
+        return _redirect("Не найдено ни одного номера закупки.")
+    _start_background_job(_run_numbers_processing(numbers, force=bool(force)))
+    return _redirect(f"Запущена обработка номеров: {len(numbers)}.")
+
+
+async def _run_range_processing(start_row: int, end_row: int, force: bool) -> None:
+    global _background_error
+    settings = get_settings()
+    async with make_session_factory(settings.database_url)() as session:
+        processor, source = _processor(session)
+        try:
+            await processor.process_row_range(start_row, end_row, force=force)
+            _background_error = None
+        except Exception as exc:
+            _background_error = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            await source.aclose()
+
+
+async def _run_numbers_processing(numbers: list[str], force: bool) -> None:
+    global _background_error
+    settings = get_settings()
+    async with make_session_factory(settings.database_url)() as session:
+        processor, source = _processor(session)
+        try:
+            await processor.process_purchase_numbers(numbers, force=force)
+            _background_error = None
+        except Exception as exc:
+            _background_error = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            await source.aclose()
 
 
 @router.post("/actions/check-purchase")
@@ -264,6 +363,7 @@ def _processor(session: Any) -> tuple[ProcurementProcessor, Eis44Source]:
             db=session,
             spreadsheet_id=settings.google_spreadsheet_id,
             sheet_name=settings.google_main_sheet,
+            review_sheet_name=settings.google_review_sheet,
         ),
         source,
     )
@@ -271,6 +371,16 @@ def _processor(session: Any) -> tuple[ProcurementProcessor, Eis44Source]:
 
 def _redirect(message: str) -> RedirectResponse:
     return RedirectResponse(f"/ui/?message={escape(message)}", status_code=303)
+
+
+def _parse_purchase_numbers(value: str) -> list[str]:
+    seen: set[str] = set()
+    numbers: list[str] = []
+    for item in re.findall(r"\d{11,20}", value):
+        if item not in seen:
+            seen.add(item)
+            numbers.append(item)
+    return numbers
 
 
 def _notice(message: str | None) -> str:
@@ -334,6 +444,69 @@ def _form_button(action: str, label: str, icon: str) -> str:
     """
 
 
+def _help_body() -> str:
+    return """
+    <section class="panel help">
+      <h2>Как работать с панелью</h2>
+      <div class="steps">
+        <div><strong>1</strong><span>Проверьте, что Google таблица настроена, а основной лист указан верно.</span></div>
+        <div><strong>2</strong><span>Для обычной работы используйте ручную обработку по диапазону строк или списку номеров.</span></div>
+        <div><strong>3</strong><span>После запуска смотрите блок статуса и саму Google Таблицу: результат записывается туда.</span></div>
+      </div>
+    </section>
+    <section class="panel help">
+      <h2>Быстрые действия</h2>
+      <table>
+        <thead><tr><th>Кнопка</th><th>Что делает</th><th>Когда нажимать</th></tr></thead>
+        <tbody>
+          <tr><td>Инициализировать листы</td><td>Добавляет служебные колонки в основной лист и создает лист проверки, если их нет.</td><td>При первом запуске или после изменения структуры таблицы.</td></tr>
+          <tr><td>Проверить схему</td><td>Показывает, какие колонки программа нашла в Google Таблице и в какой строке находятся заголовки.</td><td>Если программа пишет не туда или не видит нужные поля.</td></tr>
+          <tr><td>Первичная обработка</td><td>Запускает проход по рабочим строкам таблицы, где не заполнены победитель или поставляемый товар.</td><td>Для массового заполнения, лучше запускать осторожно.</td></tr>
+          <tr><td>Обработать очередь</td><td>Запускает тот же фоновый проход по строкам, которые требуют дозаполнения.</td><td>Для повторного ручного запуска обработки.</td></tr>
+          <tr><td>Синхронизировать проверки</td><td>Добавляет открытые проверки из базы на лист проверки и закрывает те, которые отмечены завершенными.</td><td>После обработки закупок или после работы с листом “Требуется проверка”.</td></tr>
+        </tbody>
+      </table>
+    </section>
+    <section class="panel help">
+      <h2>Проверка закупки</h2>
+      <table>
+        <tbody>
+          <tr><td>Поле “Номер закупки”</td><td>Введите один номер процедуры. Панель покажет найденный результат по этой закупке.</td></tr>
+          <tr><td>Записать в таблицу</td><td>Если галочка включена, результат будет записан в строку этой закупки в Google Таблице. Если выключена, это только просмотр результата.</td></tr>
+          <tr><td>Выполнить</td><td>Запускает проверку одного номера сразу, без фоновой очереди.</td></tr>
+        </tbody>
+      </table>
+    </section>
+    <section class="panel help">
+      <h2>Ручная обработка</h2>
+      <table>
+        <thead><tr><th>Режим</th><th>Что заполнить</th><th>Как работает</th></tr></thead>
+        <tbody>
+          <tr><td>Диапазон строк</td><td>“Строка с” и “Строка по”. Например: 120 и 180.</td><td>Программа смотрит только этот кусок таблицы, пропускает строки-разделители и строки без номера закупки.</td></tr>
+          <tr><td>Запустить диапазон</td><td>Кнопка запускает обработку указанного диапазона строк.</td><td>Используйте, когда нужно проверить конкретный участок таблицы.</td></tr>
+          <tr><td>Перепроверить заполненные</td><td>Галочка рядом с диапазоном строк.</td><td>Если выключена, строки с заполненными “Кто выиграл” и “Поставляемый товар” пропускаются. Если включена, найденные строки проверяются заново.</td></tr>
+          <tr><td>Список номеров</td><td>Вставьте номера через пробел, запятую или с новой строки.</td><td>Программа ищет эти номера в таблице и обрабатывает только найденные строки.</td></tr>
+          <tr><td>Запустить номера</td><td>Кнопка запускает обработку вставленного списка закупок.</td><td>Используйте, когда нужно точечно проверить несколько процедур.</td></tr>
+          <tr><td>Перепроверить найденные</td><td>Галочка рядом со списком номеров.</td><td>Если включена, выбранные номера обрабатываются даже при уже заполненных полях.</td></tr>
+        </tbody>
+      </table>
+    </section>
+    <section class="panel help">
+      <h2>Статус обработки</h2>
+      <table>
+        <tbody>
+          <tr><td>Фоновая обработка</td><td>Показывает, идет ли сейчас ручной или автоматический запуск.</td></tr>
+          <tr><td>Последний запуск</td><td>Время последнего прохода.</td></tr>
+          <tr><td>Статус</td><td>RUNNING — идет, COMPLETED — завершено без ошибок, FAILED — были ошибки по отдельным строкам.</td></tr>
+          <tr><td>Проверено строк</td><td>Сколько строк или номеров программа взяла в работу.</td></tr>
+          <tr><td>Обновлено</td><td>Сколько строк успешно записано в таблицу.</td></tr>
+          <tr><td>Ошибок</td><td>Сколько строк не удалось обработать. Подробности смотрятся в логах контейнера.</td></tr>
+        </tbody>
+      </table>
+    </section>
+    """
+
+
 def _page(title: str, active: str, body: str, status_code: int = 200) -> str:
     del status_code
     return f"""<!doctype html>
@@ -373,17 +546,27 @@ def _page(title: str, active: str, body: str, status_code: int = 200) -> str:
     button:hover {{ background: var(--accent-dark); }}
     .icon {{ margin-right: 8px; }}
     .check-form {{ display: grid; grid-template-columns: minmax(260px, 1fr) 220px 180px; gap: 12px; align-items: center; }}
-    input {{ min-height: 42px; border: 1px solid var(--line); border-radius: 7px; padding: 0 12px; font: inherit; }}
+    .range-form {{ display: grid; grid-template-columns: 150px 150px 240px minmax(180px, 1fr); gap: 12px; align-items: center; margin-bottom: 14px; }}
+    .numbers-form {{ display: grid; grid-template-columns: minmax(320px, 1fr) 240px 220px; gap: 12px; align-items: stretch; }}
+    input, textarea {{ border: 1px solid var(--line); border-radius: 7px; padding: 0 12px; font: inherit; }}
+    input {{ min-height: 42px; }}
+    textarea {{ min-height: 86px; padding-top: 10px; resize: vertical; }}
     .switch {{ color: var(--muted); display: flex; align-items: center; gap: 8px; }}
     table {{ width: 100%; border-collapse: collapse; }}
     th, td {{ border-bottom: 1px solid var(--line); padding: 10px; text-align: left; vertical-align: top; }}
     th {{ color: var(--muted); font-size: 13px; }}
     .notice {{ border: 1px solid #b7dfc4; background: #eef9f1; color: #0f5d32; padding: 12px 14px; border-radius: 8px; margin-bottom: 16px; }}
     .error-panel {{ border-left: 4px solid #b42318; }}
+    .help table td:first-child {{ width: 230px; font-weight: 700; }}
+    .steps {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }}
+    .steps div {{ border: 1px solid var(--line); border-radius: 8px; padding: 14px; display: grid; grid-template-columns: 36px 1fr; gap: 10px; align-items: start; }}
+    .steps strong {{ width: 28px; height: 28px; border-radius: 50%; background: var(--accent); color: white; display: inline-flex; align-items: center; justify-content: center; }}
+    .steps span {{ color: var(--text); }}
     @media (max-width: 860px) {{
       header {{ padding: 0 16px; }}
       main {{ padding: 16px; }}
-      .toolbar, .actions, .check-form {{ grid-template-columns: 1fr; }}
+      .toolbar, .actions, .check-form, .range-form, .numbers-form {{ grid-template-columns: 1fr; }}
+      .steps {{ grid-template-columns: 1fr; }}
     }}
   </style>
 </head>
@@ -392,6 +575,7 @@ def _page(title: str, active: str, body: str, status_code: int = 200) -> str:
     <h1>Закупки 44-ФЗ</h1>
     <nav>
       <a class="{"active" if active == "dashboard" else ""}" href="/ui/">Панель</a>
+      <a class="{"active" if active == "help" else ""}" href="/ui/help">Справка</a>
     </nav>
   </header>
   <main>{body}</main>

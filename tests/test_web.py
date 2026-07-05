@@ -3,7 +3,7 @@ from fastapi.testclient import TestClient
 
 from app.config.settings import Settings
 from app.web.security import require_web_auth
-from app.web.views import _page
+from app.web.views import _help_body, _page, _parse_purchase_numbers
 
 
 def test_web_auth_allows_when_token_empty() -> None:
@@ -45,3 +45,19 @@ def test_page_renders_admin_shell() -> None:
     assert "Закупки 44-ФЗ" in html
     assert "<section>ok</section>" in html
     assert "/ui/" in html
+    assert "/ui/help" in html
+
+
+def test_help_body_describes_main_controls() -> None:
+    html = _help_body()
+    assert "Инициализировать листы" in html
+    assert "Запустить диапазон" in html
+    assert "Запустить номера" in html
+    assert "Статус обработки" in html
+
+
+def test_parse_purchase_numbers_deduplicates_input() -> None:
+    assert _parse_purchase_numbers("0372200113126000006, text\n0372200113126000006 0128200000126003312") == [
+        "0372200113126000006",
+        "0128200000126003312",
+    ]

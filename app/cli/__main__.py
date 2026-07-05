@@ -88,6 +88,7 @@ async def _run_processing_command(
         db=session,
         spreadsheet_id=settings.google_spreadsheet_id,
         sheet_name=settings.google_main_sheet,
+        review_sheet_name=settings.google_review_sheet,
     )
     try:
         if args.command == "backfill-2026":

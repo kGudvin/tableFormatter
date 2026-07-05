@@ -22,6 +22,7 @@ from app.db.models import (
 from app.domain.models import OfficialResult, ResultStatus
 from app.domain.products import format_products
 from app.domain.snapshots import field_hash, is_manual_change
+from app.review.sync import publish_open_reviews
 from app.services.result_builder import build_official_result
 from app.sheets.client import SheetsClient, a1_col, inspect_main_sheet
 from app.sheets.schema import SheetSchema, is_working_row, normalize_purchase_number
@@ -37,12 +38,22 @@ class RowUpdate:
 
 
 @dataclass
+class ProcessingSummary:
+    checked: int = 0
+    updates: int = 0
+    errors: int = 0
+    skipped: int = 0
+    missing: int = 0
+
+
+@dataclass
 class ProcurementProcessor:
     source: ProcurementSource
     sheets: SheetsClient
     db: AsyncSession
     spreadsheet_id: str
     sheet_name: str
+    review_sheet_name: str | None = None
 
     async def process_purchase(self, purchase_number: str, write: bool = True) -> OfficialResult:
         result = await self._build_result(purchase_number)
@@ -65,45 +76,119 @@ class ProcurementProcessor:
         self.db.add(run)
         schema = await inspect_main_sheet(self.sheets, self.sheet_name)
         values = await self.sheets.read_values(f"'{self.sheet_name}'!A:{a1_col(len(schema.original_headers))}")
-        checked = updates = errors = 0
+        summary = ProcessingSummary()
         for row_number, row in enumerate(values, start=1):
             if row_number <= schema.header_row or not is_working_row(row, schema):
                 continue
             purchase_number = normalize_purchase_number(row[schema.purchase_number_column - 1])
             if not self._row_needs_autofill(row, schema):
+                summary.skipped += 1
                 continue
-            checked += 1
-            try:
-                result = await self._build_result(purchase_number)
-                await self._write_result(schema, row_number, row, result)
-                await self._persist_result(result, row_number)
-                updates += 1
-            except Exception as exc:
-                errors += 1
-                logger.exception(
-                    "purchase_processing_failed",
+            await self._process_known_row(schema, row_number, row, purchase_number, run_id, run, summary)
+        await self._finish_run(run, summary)
+        await self._publish_reviews()
+
+    async def process_row_range(self, start_row: int, end_row: int, force: bool = False) -> ProcessingSummary:
+        run_id = str(uuid4())
+        run = ProcessingRun(id=run_id, job_type=f"web-range-{start_row}-{end_row}")
+        self.db.add(run)
+        schema = await inspect_main_sheet(self.sheets, self.sheet_name)
+        values = await self.sheets.read_values(f"'{self.sheet_name}'!A:{a1_col(len(schema.original_headers))}")
+        summary = ProcessingSummary()
+        lower, upper = sorted((start_row, end_row))
+        for row_number, row in enumerate(values, start=1):
+            if row_number < lower or row_number > upper:
+                continue
+            if row_number <= schema.header_row or not is_working_row(row, schema):
+                summary.skipped += 1
+                continue
+            if not force and not self._row_needs_autofill(row, schema):
+                summary.skipped += 1
+                continue
+            purchase_number = normalize_purchase_number(row[schema.purchase_number_column - 1])
+            await self._process_known_row(schema, row_number, row, purchase_number, run_id, run, summary)
+        await self._finish_run(run, summary)
+        await self._publish_reviews()
+        return summary
+
+    async def process_purchase_numbers(
+        self, purchase_numbers: list[str], force: bool = True
+    ) -> ProcessingSummary:
+        run_id = str(uuid4())
+        run = ProcessingRun(id=run_id, job_type="web-purchase-list")
+        self.db.add(run)
+        schema = await inspect_main_sheet(self.sheets, self.sheet_name)
+        values = await self.sheets.read_values(f"'{self.sheet_name}'!A:{a1_col(len(schema.original_headers))}")
+        rows_by_purchase: dict[str, tuple[int, list[Any]]] = {}
+        for row_number, row in enumerate(values, start=1):
+            if row_number <= schema.header_row or not is_working_row(row, schema):
+                continue
+            purchase_number = normalize_purchase_number(row[schema.purchase_number_column - 1])
+            rows_by_purchase.setdefault(purchase_number, (row_number, row))
+
+        summary = ProcessingSummary()
+        for purchase_number in purchase_numbers:
+            row_info = rows_by_purchase.get(purchase_number)
+            if row_info is None:
+                summary.missing += 1
+                continue
+            row_number, row = row_info
+            if not force and not self._row_needs_autofill(row, schema):
+                summary.skipped += 1
+                continue
+            await self._process_known_row(schema, row_number, row, purchase_number, run_id, run, summary)
+        await self._finish_run(run, summary)
+        await self._publish_reviews()
+        return summary
+
+    async def _process_known_row(
+        self,
+        schema: SheetSchema,
+        row_number: int,
+        row: list[Any],
+        purchase_number: str,
+        run_id: str,
+        run: ProcessingRun,
+        summary: ProcessingSummary,
+    ) -> None:
+        summary.checked += 1
+        try:
+            result = await self._build_result(purchase_number)
+            await self._write_result(schema, row_number, row, result)
+            await self._persist_result(result, row_number)
+            summary.updates += 1
+        except Exception as exc:
+            summary.errors += 1
+            logger.exception(
+                "purchase_processing_failed",
+                purchase_number=purchase_number,
+                run_id=run_id,
+                error_type=type(exc).__name__,
+                error=str(exc)[:1000],
+            )
+            await self.db.rollback()
+            self.db.add(run)
+            self.db.add(
+                AuditLog(
                     purchase_number=purchase_number,
+                    actor="app",
+                    source=run.job_type,
+                    reason=type(exc).__name__,
                     run_id=run_id,
-                    error_type=type(exc).__name__,
-                    error=str(exc)[:1000],
                 )
-                await self.db.rollback()
-                self.db.add(run)
-                self.db.add(
-                    AuditLog(
-                        purchase_number=purchase_number,
-                        actor="app",
-                        source="backfill-2026",
-                        reason=type(exc).__name__,
-                        run_id=run_id,
-                    )
-                )
-        run.checked_rows = checked
-        run.updates_count = updates
-        run.errors_count = errors
-        run.status = "FAILED" if errors else "COMPLETED"
+            )
+
+    async def _finish_run(self, run: ProcessingRun, summary: ProcessingSummary) -> None:
+        run.checked_rows = summary.checked
+        run.updates_count = summary.updates
+        run.errors_count = summary.errors + summary.missing
+        run.status = "FAILED" if run.errors_count else "COMPLETED"
         run.finished_at = datetime.now(UTC)
         await self.db.commit()
+
+    async def _publish_reviews(self) -> None:
+        if self.review_sheet_name:
+            await publish_open_reviews(self.db, self.sheets, self.review_sheet_name)
 
     async def _find_row(self, purchase_number: str, schema: SheetSchema) -> tuple[int, list[Any]]:
         values = await self.sheets.read_values(f"'{self.sheet_name}'!A:{a1_col(len(schema.original_headers))}")

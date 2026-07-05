@@ -34,6 +34,7 @@ async def process_due_once(session: AsyncSession) -> None:
             db=session,
             spreadsheet_id=settings.google_spreadsheet_id,
             sheet_name=settings.google_main_sheet,
+            review_sheet_name=settings.google_review_sheet,
         )
         await processor.backfill_empty_rows()
     finally:
