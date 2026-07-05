@@ -44,14 +44,26 @@ async def dashboard(request: Request, message: str | None = None) -> HTMLRespons
     settings = get_settings()
     require_web_auth(request, settings)
     configured = bool(settings.google_spreadsheet_id)
+    sheet_url = _google_sheet_url(settings.google_spreadsheet_id)
     latest_run = await _latest_processing_run()
     job_snapshot = _job_snapshot()
     return HTMLResponse(
         _page(
-            title="Закупки 44-ФЗ",
+            title="Форматтер таблиц",
             active="dashboard",
             body=f"""
             {_notice(message)}
+            <section class="hero-panel">
+              <div>
+                <span class="eyebrow">kGudvin tools</span>
+                <h2>Форматтер таблиц</h2>
+                <p>Проверка закупок, заполнение результатов из ЕИС и синхронизация рабочих листов Google.</p>
+              </div>
+              <div class="hero-actions">
+                <a class="button-link primary" href="{sheet_url}" target="_blank" rel="noopener">Открыть Google Таблицу</a>
+                <a class="button-link" href="/ui/help">Справка</a>
+              </div>
+            </section>
             <section class="toolbar">
               {_metric("Google таблица", "настроена" if configured else "не настроена", configured)}
               {_metric("Основной лист", settings.google_main_sheet, True)}
@@ -373,6 +385,12 @@ def _redirect(message: str) -> RedirectResponse:
     return RedirectResponse(f"/ui/?message={escape(message)}", status_code=303)
 
 
+def _google_sheet_url(spreadsheet_id: str) -> str:
+    if not spreadsheet_id:
+        return "https://docs.google.com/spreadsheets/"
+    return f"https://docs.google.com/spreadsheets/d/{escape(spreadsheet_id)}/edit?hl=ru&gid=1386397104#gid=1386397104"
+
+
 def _parse_purchase_numbers(value: str) -> list[str]:
     seen: set[str] = set()
     numbers: list[str] = []
@@ -517,54 +535,74 @@ def _page(title: str, active: str, body: str, status_code: int = 200) -> str:
   <title>{escape(title)}</title>
   <style>
     :root {{
-      --bg: #f6f7f9;
-      --surface: #ffffff;
-      --text: #20242a;
-      --muted: #667085;
-      --line: #d9dee7;
-      --accent: #176b87;
-      --accent-dark: #0f4d61;
-      --ok: #107c41;
-      --warn: #a15c00;
+      --bg: #050810;
+      --bg-soft: #08110f;
+      --surface: #101722;
+      --surface-strong: #151f2e;
+      --text: #f7f9fc;
+      --muted: #9fb0c8;
+      --line: #26344a;
+      --accent: #40cdb7;
+      --accent-dark: #2ea994;
+      --accent-text: #03120f;
+      --ok: #40cdb7;
+      --warn: #ffc15a;
+      --danger: #f06c75;
     }}
     * {{ box-sizing: border-box; }}
-    body {{ margin: 0; font: 15px/1.45 Arial, sans-serif; background: var(--bg); color: var(--text); }}
-    header {{ height: 60px; display: flex; align-items: center; justify-content: space-between; padding: 0 28px; background: var(--surface); border-bottom: 1px solid var(--line); }}
-    h1 {{ margin: 0; font-size: 20px; font-weight: 700; }}
-    nav a {{ color: var(--muted); text-decoration: none; margin-left: 18px; font-weight: 600; }}
-    nav a.active {{ color: var(--accent); }}
-    main {{ max-width: 1180px; margin: 0 auto; padding: 24px; }}
+    body {{ margin: 0; font: 15px/1.45 Arial, sans-serif; background: radial-gradient(circle at top left, rgba(64, 205, 183, .1), transparent 34%), linear-gradient(180deg, var(--bg-soft), var(--bg) 320px); color: var(--text); }}
+    header {{ min-height: 66px; display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 0 32px; background: rgba(12, 17, 27, .9); border-bottom: 1px solid var(--line); backdrop-filter: blur(12px); }}
+    h1 {{ margin: 0; font-size: 20px; font-weight: 800; letter-spacing: 0; }}
+    nav {{ display: flex; align-items: center; gap: 10px; }}
+    nav a {{ color: var(--muted); text-decoration: none; font-weight: 700; border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; }}
+    nav a:hover, nav a.active {{ color: var(--text); border-color: rgba(64, 205, 183, .55); background: rgba(64, 205, 183, .08); }}
+    main {{ max-width: 1240px; margin: 0 auto; padding: 28px 24px 40px; }}
+    .hero-panel {{ background: linear-gradient(135deg, rgba(64, 205, 183, .12), rgba(255, 193, 90, .08)), var(--surface); border: 1px solid var(--line); border-top: 4px solid var(--accent); border-radius: 8px; padding: 24px; margin-bottom: 18px; display: flex; justify-content: space-between; gap: 24px; align-items: center; }}
+    .hero-panel h2 {{ margin: 6px 0 8px; font-size: 30px; line-height: 1.12; }}
+    .hero-panel p {{ margin: 0; max-width: 650px; color: var(--muted); font-size: 17px; }}
+    .eyebrow {{ color: var(--accent); font-size: 12px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }}
+    .hero-actions {{ display: grid; gap: 10px; min-width: 230px; }}
+    .button-link {{ min-height: 44px; border: 1px solid var(--line); border-radius: 8px; color: var(--text); text-decoration: none; display: inline-flex; align-items: center; justify-content: center; font-weight: 800; padding: 10px 14px; background: rgba(255, 255, 255, .03); }}
+    .button-link:hover {{ border-color: rgba(64, 205, 183, .55); background: rgba(64, 205, 183, .08); }}
+    .button-link.primary {{ background: var(--accent); color: var(--accent-text); border-color: var(--accent); }}
+    .button-link.primary:hover {{ background: var(--accent-dark); border-color: var(--accent-dark); }}
     .toolbar {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }}
-    .metric {{ background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--ok); border-radius: 8px; padding: 14px; min-height: 78px; }}
+    .metric {{ background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--ok); border-radius: 8px; padding: 14px; min-height: 78px; box-shadow: 0 16px 36px rgba(0, 0, 0, .16); }}
     .metric.warn {{ border-left-color: var(--warn); }}
     .metric span {{ display: block; color: var(--muted); font-size: 13px; }}
-    .metric strong {{ display: block; margin-top: 8px; font-size: 17px; overflow-wrap: anywhere; }}
-    .panel {{ background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 18px; margin-bottom: 18px; }}
-    h2 {{ margin: 0 0 14px; font-size: 18px; }}
+    .metric strong {{ display: block; margin-top: 8px; font-size: 17px; overflow-wrap: anywhere; color: var(--text); }}
+    .panel {{ background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 18px; margin-bottom: 18px; box-shadow: 0 16px 36px rgba(0, 0, 0, .16); }}
+    h2 {{ margin: 0 0 14px; font-size: 19px; }}
     .actions {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }}
-    button {{ width: 100%; min-height: 42px; border: 0; border-radius: 7px; background: var(--accent); color: white; font-weight: 700; cursor: pointer; padding: 10px 12px; }}
-    button:hover {{ background: var(--accent-dark); }}
+    button {{ width: 100%; min-height: 44px; border: 1px solid rgba(64, 205, 183, .35); border-radius: 8px; background: rgba(64, 205, 183, .12); color: var(--text); font-weight: 800; cursor: pointer; padding: 10px 12px; }}
+    button:hover {{ background: var(--accent); color: var(--accent-text); border-color: var(--accent); }}
     .icon {{ margin-right: 8px; }}
     .check-form {{ display: grid; grid-template-columns: minmax(260px, 1fr) 220px 180px; gap: 12px; align-items: center; }}
     .range-form {{ display: grid; grid-template-columns: 150px 150px 240px minmax(180px, 1fr); gap: 12px; align-items: center; margin-bottom: 14px; }}
     .numbers-form {{ display: grid; grid-template-columns: minmax(320px, 1fr) 240px 220px; gap: 12px; align-items: stretch; }}
-    input, textarea {{ border: 1px solid var(--line); border-radius: 7px; padding: 0 12px; font: inherit; }}
+    input, textarea {{ border: 1px solid var(--line); border-radius: 8px; padding: 0 12px; font: inherit; background: #0b111d; color: var(--text); outline: none; }}
+    input::placeholder, textarea::placeholder {{ color: #7587a3; }}
+    input:focus, textarea:focus {{ border-color: var(--accent); box-shadow: 0 0 0 3px rgba(64, 205, 183, .12); }}
     input {{ min-height: 42px; }}
     textarea {{ min-height: 86px; padding-top: 10px; resize: vertical; }}
-    .switch {{ color: var(--muted); display: flex; align-items: center; gap: 8px; }}
+    .switch {{ color: var(--muted); display: flex; align-items: center; gap: 8px; font-weight: 700; }}
+    .switch input {{ width: 18px; height: 18px; accent-color: var(--accent); }}
     table {{ width: 100%; border-collapse: collapse; }}
     th, td {{ border-bottom: 1px solid var(--line); padding: 10px; text-align: left; vertical-align: top; }}
-    th {{ color: var(--muted); font-size: 13px; }}
-    .notice {{ border: 1px solid #b7dfc4; background: #eef9f1; color: #0f5d32; padding: 12px 14px; border-radius: 8px; margin-bottom: 16px; }}
-    .error-panel {{ border-left: 4px solid #b42318; }}
+    th {{ color: var(--muted); font-size: 13px; background: var(--surface-strong); }}
+    td {{ color: #dce5f4; }}
+    .notice {{ border: 1px solid rgba(64, 205, 183, .38); background: rgba(64, 205, 183, .1); color: #bff4e9; padding: 12px 14px; border-radius: 8px; margin-bottom: 16px; }}
+    .error-panel {{ border-left: 4px solid var(--danger); }}
     .help table td:first-child {{ width: 230px; font-weight: 700; }}
     .steps {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }}
-    .steps div {{ border: 1px solid var(--line); border-radius: 8px; padding: 14px; display: grid; grid-template-columns: 36px 1fr; gap: 10px; align-items: start; }}
-    .steps strong {{ width: 28px; height: 28px; border-radius: 50%; background: var(--accent); color: white; display: inline-flex; align-items: center; justify-content: center; }}
+    .steps div {{ border: 1px solid var(--line); border-radius: 8px; padding: 14px; display: grid; grid-template-columns: 36px 1fr; gap: 10px; align-items: start; background: #0b111d; }}
+    .steps strong {{ width: 28px; height: 28px; border-radius: 8px; background: var(--accent); color: var(--accent-text); display: inline-flex; align-items: center; justify-content: center; }}
     .steps span {{ color: var(--text); }}
     @media (max-width: 860px) {{
-      header {{ padding: 0 16px; }}
+      header {{ padding: 12px 16px; align-items: flex-start; flex-direction: column; }}
       main {{ padding: 16px; }}
+      .hero-panel {{ flex-direction: column; align-items: stretch; padding: 18px; }}
+      .hero-panel h2 {{ font-size: 26px; }}
       .toolbar, .actions, .check-form, .range-form, .numbers-form {{ grid-template-columns: 1fr; }}
       .steps {{ grid-template-columns: 1fr; }}
     }}
@@ -572,7 +610,7 @@ def _page(title: str, active: str, body: str, status_code: int = 200) -> str:
 </head>
 <body>
   <header>
-    <h1>Закупки 44-ФЗ</h1>
+    <h1>Форматтер таблиц</h1>
     <nav>
       <a class="{"active" if active == "dashboard" else ""}" href="/ui/">Панель</a>
       <a class="{"active" if active == "help" else ""}" href="/ui/help">Справка</a>

@@ -42,7 +42,7 @@ def test_web_auth_hides_disabled_ui() -> None:
 
 def test_page_renders_admin_shell() -> None:
     html = _page("Тест", "dashboard", "<section>ok</section>")
-    assert "Закупки 44-ФЗ" in html
+    assert "Форматтер таблиц" in html
     assert "<section>ok</section>" in html
     assert "/ui/" in html
     assert "/ui/help" in html
