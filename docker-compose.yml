@@ -38,6 +38,29 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  worker:
+    build: .
+    restart: unless-stopped
+    command: ["python", "-m", "app.scheduler.worker"]
+    env_file: .env
+    environment:
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/google-service-account.json
+      EIS_CA_BUNDLE: /app/certs/eis-ca-bundle.pem
+      PYTHONUNBUFFERED: "1"
+    depends_on:
+      app:
+        condition: service_healthy
+    volumes:
+      - document-cache:/var/cache/procurement-documents
+      - ./certs:/app/certs:ro
+      - ${GOOGLE_SERVICE_ACCOUNT_FILE:-./secrets/google-service-account.json}:/run/secrets/google-service-account.json:ro
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      disable: true
+
 volumes:
   postgres-data:
   document-cache:

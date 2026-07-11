@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import asyncio
 import re
-from dataclasses import dataclass
-from datetime import UTC, datetime
 from html import escape
 from typing import Any
 
@@ -12,10 +9,11 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import desc, select
 
 from app.config import get_settings
-from app.db.models import ProcessingRun
+from app.db.models import ProcessingJob, ProcessingRun
 from app.db.session import make_session_factory
 from app.domain.products import format_products
 from app.review.sync import publish_open_reviews, sync_review_sheet
+from app.services.job_queue import enqueue_job
 from app.services.processor import ProcurementProcessor
 from app.sheets.client import (
     GoogleSheetsClient,
@@ -27,16 +25,6 @@ from app.sources.eis44 import Eis44Source
 from app.web.security import require_web_auth
 
 router = APIRouter()
-_background_task: asyncio.Task[None] | None = None
-_background_started_at: datetime | None = None
-_background_error: str | None = None
-
-
-@dataclass(frozen=True)
-class JobSnapshot:
-    running: bool
-    started_at: datetime | None
-    error: str | None
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -46,7 +34,7 @@ async def dashboard(request: Request, message: str | None = None) -> HTMLRespons
     configured = bool(settings.google_spreadsheet_id)
     sheet_url = _google_sheet_url(settings.google_spreadsheet_id)
     latest_run = await _latest_processing_run()
-    job_snapshot = _job_snapshot()
+    latest_job = await _latest_processing_job()
     return HTMLResponse(
         _page(
             title="Форматтер таблиц",
@@ -102,7 +90,7 @@ async def dashboard(request: Request, message: str | None = None) -> HTMLRespons
                 <button type="submit">▶ Запустить номера</button>
               </form>
             </section>
-            {_processing_status_panel(job_snapshot, latest_run)}
+            {_processing_status_panel(latest_job, latest_run)}
             """,
         )
     )
@@ -158,64 +146,16 @@ async def inspect_sheet(request: Request) -> HTMLResponse:
 async def backfill(request: Request) -> RedirectResponse:
     settings = get_settings()
     require_web_auth(request, settings)
-    if _job_snapshot().running:
-        return _redirect("Обработка уже идет. Статус ниже на этой странице.")
-    _start_background_processing()
-    return _redirect("Первичная обработка запущена в фоне. Можно оставить страницу открытой и обновлять статус.")
+    job, created = await _enqueue("backfill")
+    return _redirect(_enqueue_message(job, created))
 
 
 @router.post("/actions/process-due")
 async def process_due(request: Request) -> RedirectResponse:
     settings = get_settings()
     require_web_auth(request, settings)
-    if _job_snapshot().running:
-        return _redirect("Обработка уже идет. Статус ниже на этой странице.")
-    _start_background_processing()
-    return _redirect("Очередь запущена в фоне. Можно оставить страницу открытой и обновлять статус.")
-
-
-async def _run_background_processing() -> None:
-    global _background_error
-    settings = get_settings()
-    async with make_session_factory(settings.database_url)() as session:
-        processor, source = _processor(session)
-        try:
-            await processor.backfill_empty_rows()
-            _background_error = None
-        except Exception as exc:
-            _background_error = f"{type(exc).__name__}: {exc}"
-            raise
-        finally:
-            await source.aclose()
-
-
-def _start_background_processing() -> None:
-    _start_background_job(_run_background_processing())
-
-
-def _start_background_job(coro: Any) -> None:
-    global _background_started_at, _background_task, _background_error
-    _background_started_at = datetime.now(UTC)
-    _background_error = None
-    _background_task = asyncio.create_task(coro)
-    _background_task.add_done_callback(_store_background_exception)
-
-
-def _job_snapshot() -> JobSnapshot:
-    task = _background_task
-    return JobSnapshot(
-        running=bool(task and not task.done()),
-        started_at=_background_started_at,
-        error=_background_error,
-    )
-
-
-def _store_background_exception(task: asyncio.Task[None]) -> None:
-    global _background_error
-    try:
-        task.result()
-    except Exception as exc:
-        _background_error = f"{type(exc).__name__}: {exc}"
+    job, created = await _enqueue("backfill")
+    return _redirect(_enqueue_message(job, created))
 
 
 @router.post("/actions/sync-review")
@@ -238,13 +178,11 @@ async def process_range(
 ) -> RedirectResponse:
     settings = get_settings()
     require_web_auth(request, settings)
-    if _job_snapshot().running:
-        return _redirect("Обработка уже идет. Дождитесь завершения текущего запуска.")
     if start_row < 1 or end_row < 1:
         return _redirect("Номера строк должны быть больше нуля.")
-    _start_background_job(_run_range_processing(start_row, end_row, force=bool(force)))
     lower, upper = sorted((start_row, end_row))
-    return _redirect(f"Запущена обработка строк {lower}-{upper}.")
+    job, created = await _enqueue("range", {"start_row": lower, "end_row": upper, "force": bool(force)})
+    return _redirect(_enqueue_message(job, created))
 
 
 @router.post("/actions/process-numbers")
@@ -255,43 +193,11 @@ async def process_numbers(
 ) -> RedirectResponse:
     settings = get_settings()
     require_web_auth(request, settings)
-    if _job_snapshot().running:
-        return _redirect("Обработка уже идет. Дождитесь завершения текущего запуска.")
     numbers = _parse_purchase_numbers(purchase_numbers)
     if not numbers:
         return _redirect("Не найдено ни одного номера закупки.")
-    _start_background_job(_run_numbers_processing(numbers, force=bool(force)))
-    return _redirect(f"Запущена обработка номеров: {len(numbers)}.")
-
-
-async def _run_range_processing(start_row: int, end_row: int, force: bool) -> None:
-    global _background_error
-    settings = get_settings()
-    async with make_session_factory(settings.database_url)() as session:
-        processor, source = _processor(session)
-        try:
-            await processor.process_row_range(start_row, end_row, force=force)
-            _background_error = None
-        except Exception as exc:
-            _background_error = f"{type(exc).__name__}: {exc}"
-            raise
-        finally:
-            await source.aclose()
-
-
-async def _run_numbers_processing(numbers: list[str], force: bool) -> None:
-    global _background_error
-    settings = get_settings()
-    async with make_session_factory(settings.database_url)() as session:
-        processor, source = _processor(session)
-        try:
-            await processor.process_purchase_numbers(numbers, force=force)
-            _background_error = None
-        except Exception as exc:
-            _background_error = f"{type(exc).__name__}: {exc}"
-            raise
-        finally:
-            await source.aclose()
+    job, created = await _enqueue("numbers", {"purchase_numbers": numbers, "force": bool(force)})
+    return _redirect(_enqueue_message(job, created))
 
 
 @router.post("/actions/check-purchase")
@@ -417,16 +323,52 @@ async def _latest_processing_run() -> ProcessingRun | None:
         return None
 
 
-def _processing_status_panel(snapshot: JobSnapshot, run: ProcessingRun | None) -> str:
+async def _latest_processing_job() -> ProcessingJob | None:
+    settings = get_settings()
+    try:
+        async with make_session_factory(settings.database_url)() as session:
+            result = await session.execute(
+                select(ProcessingJob).order_by(desc(ProcessingJob.requested_at)).limit(1)
+            )
+            return result.scalar_one_or_none()
+    except Exception:
+        return None
+
+
+async def _enqueue(job_type: str, payload: dict[str, Any] | None = None) -> tuple[ProcessingJob, bool]:
+    settings = get_settings()
+    async with make_session_factory(settings.database_url)() as session:
+        return await enqueue_job(session, job_type, payload)
+
+
+def _enqueue_message(job: ProcessingJob, created: bool) -> str:
+    if created:
+        return "Задание принято. Оно продолжит выполняться, даже если закрыть страницу."
+    return f"Обработка уже запущена ({_job_status(job.status)}). Новое задание не добавлено."
+
+
+def _job_status(status: str) -> str:
+    return {
+        "QUEUED": "ожидает запуска",
+        "RUNNING": "выполняется",
+        "COMPLETED": "завершено",
+        "FAILED": "завершено с ошибкой",
+    }.get(status, status)
+
+
+def _processing_status_panel(job: ProcessingJob | None, run: ProcessingRun | None) -> str:
     rows: list[tuple[str, str]] = []
-    if snapshot.running:
-        rows.append(("Фоновая обработка", "идет"))
-    elif snapshot.error:
-        rows.append(("Фоновая обработка", snapshot.error))
+    if job is not None:
+        rows.append(("Задание", _job_status(job.status)))
+        rows.append(("Поставлено в очередь", job.requested_at.astimezone().strftime("%d.%m.%Y %H:%M:%S")))
+        if job.started_at:
+            rows.append(("Начато", job.started_at.astimezone().strftime("%d.%m.%Y %H:%M:%S")))
+        if job.finished_at:
+            rows.append(("Завершено", job.finished_at.astimezone().strftime("%d.%m.%Y %H:%M:%S")))
+        if job.error:
+            rows.append(("Ошибка задания", job.error))
     else:
-        rows.append(("Фоновая обработка", "не запущена"))
-    if snapshot.started_at:
-        rows.append(("Запущена", snapshot.started_at.astimezone().strftime("%d.%m.%Y %H:%M:%S")))
+        rows.append(("Задание", "ещё не запускалось"))
     if run is not None:
         rows.extend(
             [
