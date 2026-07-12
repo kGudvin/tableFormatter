@@ -252,21 +252,34 @@ def _find_labeled(text: str, labels: list[str]) -> str | None:
         "торговая марка",
         "модель",
         "реестровый номер",
+        "реестровая запись",
         "количество",
         "наличие",
         "возможность",
     ]
     stop_pattern = "|".join(re.escape(label) for label in stop_labels)
     for label in labels:
-        pattern = rf"{re.escape(label)}\s*:?\s*(.+?)(?=\s+(?:{stop_pattern})\s*:|[;|,\n]|$)"
+        pattern = (
+            rf"{re.escape(label)}\s*:?\s*(.+?)"
+            rf"(?=\s+(?:{stop_pattern})(?:\s*\([^)]*\))?\s*:|[;|,\n]|$)"
+        )
         match = re.search(pattern, text, re.I)
         if match:
-            return match.group(1).strip(" .,:;")[:200]
+            value = match.group(1).strip(" .,:;")[:200]
+            if value.casefold() in {"-", "нет", "отсутствует", "не указан", "не указано"}:
+                return None
+            return value
     return None
 
 
 def _find_registry_number(text: str) -> str | None:
-    match = re.search(r"(?:реестров(?:ый|ого)? номер|РРПП|№)\s*:?\s*([A-Za-zА-Яа-я0-9./\-]+)", text, re.I)
+    match = re.search(
+        r"(?:реестров(?:ый|ого)? номер(?: реестровой записи)?|"
+        r"номер реестровой записи|реестровая запись(?:\s*\(ПП РФ №\s*719\))?|РРПП)"
+        r"\s*:?\s*([A-Za-zА-Яа-я0-9./\-]+)",
+        text,
+        re.I,
+    )
     return match.group(1).strip() if match else None
 
 

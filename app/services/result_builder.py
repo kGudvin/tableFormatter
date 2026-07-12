@@ -58,6 +58,20 @@ def build_official_result(
         attention_required = True
         review_reason = review_reason or "Контракт найден, но спецификация не извлечена"
 
+    unresolved_registry = next(
+        (
+            item.registry_number
+            for item in products
+            if item.registry_number and not item.trademark and not item.manufacturer
+        ),
+        None,
+    )
+    if unresolved_registry:
+        attention_required = True
+        review_reason = review_reason or (
+            f"Производитель не найден в действующем реестре ГИСП: {unresolved_registry}"
+        )
+
     status = ResultStatus.NEEDS_REVIEW if attention_required else ResultStatus.CONFIRMED
     if not any([winner_name, winner_inn, winning_price, current_contract_price, products]):
         status = ResultStatus.NOT_FOUND_YET

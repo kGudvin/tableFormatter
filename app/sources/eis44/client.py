@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 import ssl
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from time import monotonic
 
@@ -15,6 +15,7 @@ from app.domain.models import (
     ContractAmendment,
     ContractResult,
     FinalProtocolResult,
+    ProductItem,
     ResultStatus,
     SpecificationResult,
 )
@@ -28,6 +29,7 @@ from app.parsers.eis_text import (
     parse_products_from_text,
     parse_supplier_results_contract,
 )
+from app.sources.gisp import GISP_REGISTRY_PAGE_URL, GispRegistry, GispRegistryUnavailable
 
 
 class EisTemporaryUnavailable(RuntimeError):
@@ -54,6 +56,7 @@ class Eis44Source:
             follow_redirects=True,
             verify=self._verify_config(),
         )
+        self._gisp = GispRegistry(self.cache_dir / "gisp")
 
     def _verify_config(self) -> ssl.SSLContext | bool:
         if not self.verify_ssl:
@@ -147,6 +150,7 @@ class Eis44Source:
                 spec_url = str(self._client.base_url) + target_url
                 products = parse_contract_products_html(target_html, spec_url)
                 if products:
+                    products = await self._enrich_products_from_gisp(products)
                     return SpecificationResult(
                         purchase_number=purchase_number,
                         products=products,
@@ -169,6 +173,7 @@ class Eis44Source:
         products = parse_products_from_text(text, spec_url)
         if not products:
             return None
+        products = await self._enrich_products_from_gisp(products)
         return SpecificationResult(
             purchase_number=purchase_number,
             products=products,
@@ -178,6 +183,29 @@ class Eis44Source:
 
     async def get_amendments(self, purchase_number: str) -> list[ContractAmendment]:
         return []
+
+    async def _enrich_products_from_gisp(self, products: list[ProductItem]) -> list[ProductItem]:
+        enriched: list[ProductItem] = []
+        for item in products:
+            if item.trademark or item.manufacturer or not item.registry_number:
+                enriched.append(item)
+                continue
+            try:
+                match = await self._gisp.lookup(item.registry_number)
+            except GispRegistryUnavailable:
+                match = None
+            if match is None:
+                enriched.append(item)
+                continue
+            enriched.append(
+                replace(
+                    item,
+                    manufacturer=match.manufacturer,
+                    registry_number=match.registry_number,
+                    registry_url=GISP_REGISTRY_PAGE_URL,
+                )
+            )
+        return enriched
 
     def _notice_url(self, purchase_number: str, page: str) -> str:
         number = re.sub(r"\D", "", purchase_number)

@@ -105,3 +105,23 @@ def test_contract_product_country_stops_before_characteristics() -> None:
     products = parse_contract_products_html(html)
 
     assert products[0].country == "Российская Федерация (643)"
+    assert products[0].trademark is None
+
+
+def test_contract_product_extracts_pp719_registry_number() -> None:
+    html = """
+    <tr class="tableBlock__row">
+      <td></td>
+      <td>1. Компьютер. Товарный знак: Отсутствует Реестровая запись (ПП РФ № 719): 10512345 Страна происхождения: Российская Федерация (643)</td>
+      <td>Компьютер (26.20.15.110)</td>
+      <td>Товар</td>
+      <td>2 ШТ</td>
+      <td>100 000,00</td>
+      <td>200 000,00</td>
+    </tr>
+    """
+
+    products = parse_contract_products_html(html)
+
+    assert products[0].trademark is None
+    assert products[0].registry_number == "10512345"

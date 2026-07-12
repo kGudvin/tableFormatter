@@ -56,3 +56,15 @@ def test_price_without_winner_requires_review() -> None:
     assert result.status == ResultStatus.NEEDS_REVIEW
     assert result.attention_required
     assert result.review_reason == "Победитель не найден в данных ЕИС"
+
+
+def test_unresolved_gisp_registry_number_requires_review() -> None:
+    result = build_official_result(
+        "0123",
+        None,
+        ContractResult("0123", "ООО Ромашка", "7707083893", Decimal("100.00")),
+        SpecificationResult("0123", [ProductItem(position=1, registry_number="10512345")]),
+    )
+
+    assert result.status == ResultStatus.NEEDS_REVIEW
+    assert result.review_reason == "Производитель не найден в действующем реестре ГИСП: 10512345"
