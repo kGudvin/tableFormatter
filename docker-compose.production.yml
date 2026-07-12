@@ -26,6 +26,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - document-cache:/var/cache/procurement-documents
       - ./certs:/app/certs:ro
@@ -53,6 +55,8 @@ services:
     depends_on:
       app:
         condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - document-cache:/var/cache/procurement-documents
       - ./certs:/app/certs:ro
