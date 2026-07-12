@@ -57,6 +57,7 @@ cp .env.example .env
 - `GOOGLE_MAIN_SHEET=2026 (44)`
 - `GOOGLE_REVIEW_SHEET=Требуется проверка`
 - `WEB_UI_TOKEN=...` для защиты веб-оболочки заголовком или cookie `admin_token`
+- `EIS_PROXY_URL=http://proxy-host:port` на серверах за пределами РФ; этот proxy применяется только к запросам ЕИС
 
 Секреты не коммитятся. JSON-ключ монтируется в контейнер только для чтения.
 

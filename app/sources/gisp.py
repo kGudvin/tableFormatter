@@ -73,7 +73,7 @@ class GispRegistry:
     async def _download(self, target: Path) -> None:
         timeout = httpx.Timeout(self.timeout_seconds)
         async with (
-            httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client,
+            httpx.AsyncClient(timeout=timeout, follow_redirects=True, trust_env=False) as client,
             client.stream("GET", self.registry_url) as response,
         ):
             response.raise_for_status()

@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     eis_min_request_interval_seconds: float = 1.2
     eis_verify_ssl: bool = True
     eis_ca_bundle: Path | None = None
+    eis_proxy_url: str | None = None
     scheduler_interval_minutes: int = 30
     health_host: str = "0.0.0.0"
     health_port: int = 8080

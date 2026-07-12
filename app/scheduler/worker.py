@@ -29,6 +29,7 @@ async def process_due_once(session: AsyncSession) -> None:
         min_interval_seconds=settings.eis_min_request_interval_seconds,
         verify_ssl=settings.eis_verify_ssl,
         ca_bundle=settings.eis_ca_bundle,
+        proxy_url=settings.eis_proxy_url,
     )
     try:
         processor = ProcurementProcessor(
@@ -69,6 +70,7 @@ async def process_queued_once() -> None:
             min_interval_seconds=settings.eis_min_request_interval_seconds,
             verify_ssl=settings.eis_verify_ssl,
             ca_bundle=settings.eis_ca_bundle,
+            proxy_url=settings.eis_proxy_url,
         )
         processor = ProcurementProcessor(
             source=source,

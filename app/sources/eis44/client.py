@@ -45,6 +45,7 @@ class Eis44Source:
     retries: int = 3
     verify_ssl: bool = True
     ca_bundle: Path | None = None
+    proxy_url: str | None = None
 
     def __post_init__(self) -> None:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -55,6 +56,8 @@ class Eis44Source:
             headers={"User-Agent": "procurement-autofill/0.1 (+official-public-documents)"},
             follow_redirects=True,
             verify=self._verify_config(),
+            proxy=self.proxy_url,
+            trust_env=False,
         )
         self._gisp = GispRegistry(self.cache_dir / "gisp")
 

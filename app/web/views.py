@@ -274,6 +274,7 @@ def _processor(session: Any) -> tuple[ProcurementProcessor, Eis44Source]:
         min_interval_seconds=settings.eis_min_request_interval_seconds,
         verify_ssl=settings.eis_verify_ssl,
         ca_bundle=settings.eis_ca_bundle,
+        proxy_url=settings.eis_proxy_url,
     )
     return (
         ProcurementProcessor(
