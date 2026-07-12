@@ -10,5 +10,9 @@ def require_web_auth(request: Request, settings: Settings) -> None:
         return
     token = request.headers.get("x-admin-token") or request.cookies.get("admin_token")
     if token != settings.web_ui_token:
+        if "text/html" in request.headers.get("accept", ""):
+            raise HTTPException(
+                status_code=status.HTTP_303_SEE_OTHER,
+                headers={"Location": "/ui/login"},
+            )
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
-

@@ -6,7 +6,13 @@ from fastapi.testclient import TestClient
 from app.config.settings import Settings
 from app.db.models import ProcessingRun
 from app.web.security import require_web_auth
-from app.web.views import _help_body, _page, _parse_purchase_numbers, _processing_status_panel
+from app.web.views import (
+    _help_body,
+    _login_error,
+    _page,
+    _parse_purchase_numbers,
+    _processing_status_panel,
+)
 
 
 def test_web_auth_allows_when_token_empty() -> None:
@@ -30,6 +36,21 @@ def test_web_auth_rejects_wrong_token() -> None:
 
     assert TestClient(app).get("/").status_code == 401
     assert TestClient(app).get("/", headers={"x-admin-token": "secret"}).status_code == 200
+
+
+def test_web_auth_redirects_browser_to_login() -> None:
+    app = FastAPI()
+
+    @app.get("/")
+    async def route(request: Request) -> dict[str, bool]:
+        require_web_auth(request, Settings(web_ui_token="secret"))
+        return {"ok": True}
+
+    response = TestClient(app).get(
+        "/", headers={"accept": "text/html"}, follow_redirects=False
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "/ui/login"
 
 
 def test_web_auth_hides_disabled_ui() -> None:
@@ -82,3 +103,8 @@ def test_processing_status_panel_uses_readable_status_and_counters() -> None:
     assert "COMPLETED" not in html
     assert ">15<" in html
     assert 'data-processing-active="false"' in html
+
+
+def test_login_error_is_safe_and_readable() -> None:
+    assert _login_error(None) == ""
+    assert "Неверный пароль" in _login_error("1")

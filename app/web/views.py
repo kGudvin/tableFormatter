@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import secrets
 from html import escape
 from typing import Any
 
@@ -25,6 +26,57 @@ from app.sources.eis44 import Eis44Source
 from app.web.security import require_web_auth
 
 router = APIRouter()
+
+
+@router.get("/login", response_class=HTMLResponse, response_model=None)
+async def login_page(request: Request, error: str | None = None) -> HTMLResponse | RedirectResponse:
+    settings = get_settings()
+    if not settings.web_ui_enabled:
+        return RedirectResponse("/", status_code=303)
+    if not settings.web_ui_token:
+        return RedirectResponse("/ui/", status_code=303)
+    return HTMLResponse(
+        _page(
+            title="Вход",
+            active="login",
+            body=f"""
+            <section class="login-panel">
+              <span class="eyebrow">Защищённый доступ</span>
+              <h2>Вход в панель</h2>
+              {_login_error(error)}
+              <form method="post" action="/ui/login">
+                <label class="field"><span>Пароль панели</span><input name="password" type="password" autocomplete="current-password" required autofocus></label>
+                <button type="submit">Войти</button>
+              </form>
+            </section>
+            """,
+        ),
+        status_code=401 if error else 200,
+    )
+
+
+@router.post("/login")
+async def login(password: str = Form(...)) -> RedirectResponse:
+    settings = get_settings()
+    if not settings.web_ui_token or not secrets.compare_digest(password, settings.web_ui_token):
+        return RedirectResponse("/ui/login?error=1", status_code=303)
+    response = RedirectResponse("/ui/", status_code=303)
+    response.set_cookie(
+        "admin_token",
+        settings.web_ui_token,
+        max_age=60 * 60 * 24 * 30,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+    )
+    return response
+
+
+@router.post("/logout")
+async def logout() -> RedirectResponse:
+    response = RedirectResponse("/ui/login", status_code=303)
+    response.delete_cookie("admin_token")
+    return response
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -315,6 +367,10 @@ def _notice(message: str | None) -> str:
     return f"<div class='notice'>{escape(message)}</div>"
 
 
+def _login_error(error: str | None) -> str:
+    return "<div class='login-error'>Неверный пароль.</div>" if error else ""
+
+
 async def _latest_processing_run() -> ProcessingRun | None:
     settings = get_settings()
     try:
@@ -474,6 +530,9 @@ def _help_body() -> str:
 
 def _page(title: str, active: str, body: str, status_code: int = 200) -> str:
     del status_code
+    logout = ""
+    if get_settings().web_ui_token and active != "login":
+        logout = '<form class="logout-form" method="post" action="/ui/logout"><button type="submit">Выйти</button></form>'
     return f"""<!doctype html>
 <html lang="ru">
 <head>
@@ -503,6 +562,8 @@ def _page(title: str, active: str, body: str, status_code: int = 200) -> str:
     nav {{ display: flex; align-items: center; gap: 10px; }}
     nav a {{ color: var(--muted); text-decoration: none; font-weight: 700; border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; }}
     nav a:hover, nav a.active {{ color: var(--text); border-color: rgba(64, 205, 183, .55); background: rgba(64, 205, 183, .08); }}
+    .logout-form {{ margin: 0; }}
+    .logout-form button {{ width: auto; min-height: 38px; padding: 8px 12px; color: var(--muted); background: transparent; border-color: var(--line); }}
     main {{ max-width: 1240px; margin: 0 auto; padding: 24px 24px 40px; }}
     .page-head {{ margin-bottom: 18px; display: flex; justify-content: space-between; gap: 24px; align-items: end; }}
     .page-head h2 {{ margin: 4px 0 5px; font-size: 26px; line-height: 1.15; }}
@@ -556,6 +617,10 @@ def _page(title: str, active: str, body: str, status_code: int = 200) -> str:
     .status-badge.danger {{ color: #ffc4c8; border-color: rgba(240, 108, 117, .45); background: rgba(240, 108, 117, .08); }}
     .status-badge.danger i {{ background: var(--danger); }}
     .status-error {{ margin-top: 12px; border: 1px solid rgba(240, 108, 117, .35); border-radius: 8px; padding: 10px 12px; color: #ffc4c8; background: rgba(240, 108, 117, .07); overflow-wrap: anywhere; }}
+    .login-panel {{ width: min(420px, 100%); margin: 12vh auto 0; padding: 24px; border: 1px solid var(--line); border-top: 4px solid var(--accent); border-radius: 8px; background: var(--surface); }}
+    .login-panel h2 {{ margin: 6px 0 18px; font-size: 24px; }}
+    .login-panel form {{ display: grid; gap: 16px; }}
+    .login-error {{ margin-bottom: 14px; padding: 10px 12px; border: 1px solid rgba(240, 108, 117, .4); border-radius: 8px; color: #ffc4c8; background: rgba(240, 108, 117, .07); }}
     table {{ width: 100%; border-collapse: collapse; }}
     th, td {{ border-bottom: 1px solid var(--line); padding: 10px; text-align: left; vertical-align: top; }}
     th {{ color: var(--muted); font-size: 13px; background: var(--surface-strong); }}
@@ -596,6 +661,7 @@ def _page(title: str, active: str, body: str, status_code: int = 200) -> str:
     <nav>
       <a class="{"active" if active == "dashboard" else ""}" href="/ui/">Панель</a>
       <a class="{"active" if active == "help" else ""}" href="/ui/help">Справка</a>
+      {logout}
     </nav>
   </header>
   <main>{body}</main>
