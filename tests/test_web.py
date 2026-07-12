@@ -1,9 +1,12 @@
+from datetime import UTC, datetime
+
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from app.config.settings import Settings
+from app.db.models import ProcessingRun
 from app.web.security import require_web_auth
-from app.web.views import _help_body, _page, _parse_purchase_numbers
+from app.web.views import _help_body, _page, _parse_purchase_numbers, _processing_status_panel
 
 
 def test_web_auth_allows_when_token_empty() -> None:
@@ -61,3 +64,21 @@ def test_parse_purchase_numbers_deduplicates_input() -> None:
         "0372200113126000006",
         "0128200000126003312",
     ]
+
+
+def test_processing_status_panel_uses_readable_status_and_counters() -> None:
+    run = ProcessingRun(
+        job_type="backfill",
+        status="COMPLETED",
+        started_at=datetime(2026, 7, 12, tzinfo=UTC),
+        checked_rows=15,
+        updates_count=12,
+        errors_count=0,
+    )
+
+    html = _processing_status_panel(None, run)
+
+    assert "завершено" in html
+    assert "COMPLETED" not in html
+    assert ">15<" in html
+    assert 'data-processing-active="false"' in html

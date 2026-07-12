@@ -35,19 +35,21 @@ async def dashboard(request: Request, message: str | None = None) -> HTMLRespons
     sheet_url = _google_sheet_url(settings.google_spreadsheet_id)
     latest_run = await _latest_processing_run()
     latest_job = await _latest_processing_job()
+    processing_active = bool(latest_job and latest_job.status in {"QUEUED", "RUNNING"})
+    disabled = " disabled" if processing_active else ""
     return HTMLResponse(
         _page(
             title="Форматтер таблиц",
             active="dashboard",
             body=f"""
             {_notice(message)}
-            <section class="hero-panel">
+            <section class="page-head">
               <div>
                 <span class="eyebrow">kGudvin tools</span>
                 <h2>Форматтер таблиц</h2>
                 <p>Проверка закупок, заполнение результатов из ЕИС и синхронизация рабочих листов Google.</p>
               </div>
-              <div class="hero-actions">
+              <div class="page-actions">
                 <a class="button-link primary" href="{sheet_url}" target="_blank" rel="noopener">Открыть Google Таблицу</a>
                 <a class="button-link" href="/ui/help">Справка</a>
               </div>
@@ -58,39 +60,38 @@ async def dashboard(request: Request, message: str | None = None) -> HTMLRespons
               {_metric("Лист проверки", settings.google_review_sheet, True)}
               {_metric("Планировщик", f"каждые {settings.scheduler_interval_minutes} мин", True)}
             </section>
+            {_processing_status_panel(latest_job, latest_run)}
             <section class="panel">
-              <h2>Быстрые действия</h2>
+              <div class="panel-title"><h2>Быстрые действия</h2></div>
               <div class="actions">
                 {_form_button("/ui/actions/init-sheets", "Инициализировать листы", "layout")}
                 {_form_button("/ui/actions/inspect-sheet", "Проверить схему", "search")}
-                {_form_button("/ui/actions/backfill", "Первичная обработка", "play")}
-                {_form_button("/ui/actions/process-due", "Обработать очередь", "refresh")}
+                {_form_button("/ui/actions/backfill", "Обработать незаполненные", "play", processing_active)}
                 {_form_button("/ui/actions/sync-review", "Синхронизировать проверки", "check")}
               </div>
             </section>
             <section class="panel">
-              <h2>Проверка закупки</h2>
+              <div class="panel-title"><h2>Проверка закупки</h2><span class="section-tag">один номер</span></div>
               <form class="check-form" method="post" action="/ui/actions/check-purchase">
-                <input name="purchase_number" placeholder="Номер закупки" autocomplete="off" required>
+                <label class="field"><span>Номер закупки</span><input name="purchase_number" inputmode="numeric" pattern="[0-9]{{11,20}}" placeholder="Например, 0128200000125008979" autocomplete="off" required></label>
                 <label class="switch"><input type="checkbox" name="write" value="1"><span></span>Записать в таблицу</label>
                 <button type="submit">▶ Выполнить</button>
               </form>
             </section>
             <section class="panel">
-              <h2>Ручная обработка</h2>
+              <div class="panel-title"><h2>Ручная обработка</h2><span class="section-tag">диапазон или список</span></div>
               <form class="range-form" method="post" action="/ui/actions/process-range">
-                <input name="start_row" type="number" min="1" placeholder="Строка с" required>
-                <input name="end_row" type="number" min="1" placeholder="Строка по" required>
+                <label class="field"><span>Строка с</span><input name="start_row" type="number" min="1" placeholder="1" required></label>
+                <label class="field"><span>Строка по</span><input name="end_row" type="number" min="1" placeholder="100" required></label>
                 <label class="switch"><input type="checkbox" name="force" value="1"><span></span>Перепроверить заполненные</label>
-                <button type="submit">▶ Запустить диапазон</button>
+                <button type="submit"{disabled}>▶ Запустить диапазон</button>
               </form>
               <form class="numbers-form" method="post" action="/ui/actions/process-numbers">
-                <textarea name="purchase_numbers" placeholder="Номера закупок через пробел, запятую или с новой строки" required></textarea>
+                <label class="field"><span>Номера закупок</span><textarea name="purchase_numbers" placeholder="Через пробел, запятую или с новой строки" required></textarea></label>
                 <label class="switch"><input type="checkbox" name="force" value="1" checked><span></span>Перепроверить найденные</label>
-                <button type="submit">▶ Запустить номера</button>
+                <button type="submit"{disabled}>▶ Запустить номера</button>
               </form>
             </section>
-            {_processing_status_panel(latest_job, latest_run)}
             """,
         )
     )
@@ -357,35 +358,38 @@ def _job_status(status: str) -> str:
 
 
 def _processing_status_panel(job: ProcessingJob | None, run: ProcessingRun | None) -> str:
-    rows: list[tuple[str, str]] = []
+    raw_status = job.status if job is not None else (run.status if run is not None else "IDLE")
+    active = raw_status in {"QUEUED", "RUNNING"}
+    status_text = _job_status(raw_status) if raw_status != "IDLE" else "ещё не запускалось"
+    state = {
+        "QUEUED": "active",
+        "RUNNING": "active",
+        "COMPLETED": "success",
+        "FAILED": "danger",
+    }.get(raw_status, "neutral")
+    checked = str(run.checked_rows) if run is not None else "0"
+    updated = str(run.updates_count) if run is not None else "0"
+    errors = str(run.errors_count) if run is not None else "0"
+    timestamp = "—"
     if job is not None:
-        rows.append(("Задание", _job_status(job.status)))
-        rows.append(("Поставлено в очередь", job.requested_at.astimezone().strftime("%d.%m.%Y %H:%M:%S")))
-        if job.started_at:
-            rows.append(("Начато", job.started_at.astimezone().strftime("%d.%m.%Y %H:%M:%S")))
-        if job.finished_at:
-            rows.append(("Завершено", job.finished_at.astimezone().strftime("%d.%m.%Y %H:%M:%S")))
-        if job.error:
-            rows.append(("Ошибка задания", job.error))
-    else:
-        rows.append(("Задание", "ещё не запускалось"))
-    if run is not None:
-        rows.extend(
-            [
-                ("Последний запуск", run.started_at.astimezone().strftime("%d.%m.%Y %H:%M:%S")),
-                ("Статус", run.status),
-                ("Проверено строк", str(run.checked_rows)),
-                ("Обновлено", str(run.updates_count)),
-                ("Ошибок", str(run.errors_count)),
-            ]
-        )
-        if run.finished_at:
-            rows.append(("Завершен", run.finished_at.astimezone().strftime("%d.%m.%Y %H:%M:%S")))
-    body = "".join(f"<tr><td>{escape(label)}</td><td>{escape(value)}</td></tr>" for label, value in rows)
+        timestamp_value = job.started_at or job.requested_at
+        timestamp = timestamp_value.astimezone().strftime("%d.%m.%Y %H:%M")
+    elif run is not None:
+        timestamp = run.started_at.astimezone().strftime("%d.%m.%Y %H:%M")
+    error = f'<div class="status-error">{escape(job.error)}</div>' if job and job.error else ""
     return f"""
-    <section class="panel">
-      <h2>Статус обработки</h2>
-      <table><tbody>{body}</tbody></table>
+    <section class="panel status-panel" data-processing-active="{str(active).lower()}">
+      <div class="panel-title">
+        <h2>Статус обработки</h2>
+        <span class="status-badge {state}"><i></i>{escape(status_text)}</span>
+      </div>
+      <dl class="status-grid">
+        <div><dt>Последний запуск</dt><dd>{timestamp}</dd></div>
+        <div><dt>Проверено</dt><dd>{checked}</dd></div>
+        <div><dt>Обновлено</dt><dd>{updated}</dd></div>
+        <div><dt>Ошибок</dt><dd class="{'has-errors' if errors != '0' else ''}">{errors}</dd></div>
+      </dl>
+      {error}
     </section>
     """
 
@@ -395,11 +399,12 @@ def _metric(label: str, value: str, ok: bool) -> str:
     return f"<div class='metric {state}'><span>{escape(label)}</span><strong>{escape(value)}</strong></div>"
 
 
-def _form_button(action: str, label: str, icon: str) -> str:
+def _form_button(action: str, label: str, icon: str, disabled: bool = False) -> str:
     icons = {"layout": "▦", "search": "⌕", "play": "▶", "refresh": "↻", "check": "✓"}
+    disabled_attr = " disabled" if disabled else ""
     return f"""
     <form method="post" action="{action}">
-      <button type="submit" title="{escape(label)}"><span class="icon">{icons[icon]}</span>{escape(label)}</button>
+      <button type="submit" title="{escape(label)}"{disabled_attr}><span class="icon">{icons[icon]}</span>{escape(label)}</button>
     </form>
     """
 
@@ -421,8 +426,7 @@ def _help_body() -> str:
         <tbody>
           <tr><td>Инициализировать листы</td><td>Добавляет служебные колонки в основной лист и создает лист проверки, если их нет.</td><td>При первом запуске или после изменения структуры таблицы.</td></tr>
           <tr><td>Проверить схему</td><td>Показывает, какие колонки программа нашла в Google Таблице и в какой строке находятся заголовки.</td><td>Если программа пишет не туда или не видит нужные поля.</td></tr>
-          <tr><td>Первичная обработка</td><td>Запускает проход по рабочим строкам таблицы, где не заполнены победитель или поставляемый товар.</td><td>Для массового заполнения, лучше запускать осторожно.</td></tr>
-          <tr><td>Обработать очередь</td><td>Запускает тот же фоновый проход по строкам, которые требуют дозаполнения.</td><td>Для повторного ручного запуска обработки.</td></tr>
+          <tr><td>Обработать незаполненные</td><td>Запускает проход по рабочим строкам таблицы, где не заполнены победитель или поставляемый товар.</td><td>Для массового заполнения и повторного дозаполнения.</td></tr>
           <tr><td>Синхронизировать проверки</td><td>Добавляет открытые проверки из базы на лист проверки и закрывает те, которые отмечены завершенными.</td><td>После обработки закупок или после работы с листом “Требуется проверка”.</td></tr>
         </tbody>
       </table>
@@ -457,7 +461,7 @@ def _help_body() -> str:
         <tbody>
           <tr><td>Фоновая обработка</td><td>Показывает, идет ли сейчас ручной или автоматический запуск.</td></tr>
           <tr><td>Последний запуск</td><td>Время последнего прохода.</td></tr>
-          <tr><td>Статус</td><td>RUNNING — идет, COMPLETED — завершено без ошибок, FAILED — были ошибки по отдельным строкам.</td></tr>
+          <tr><td>Статус</td><td>Показывает, ожидает ли задание запуска, выполняется, завершено или требует внимания.</td></tr>
           <tr><td>Проверено строк</td><td>Сколько строк или номеров программа взяла в работу.</td></tr>
           <tr><td>Обновлено</td><td>Сколько строк успешно записано в таблицу.</td></tr>
           <tr><td>Ошибок</td><td>Сколько строк не удалось обработать. Подробности смотрятся в логах контейнера.</td></tr>
@@ -492,18 +496,18 @@ def _page(title: str, active: str, body: str, status_code: int = 200) -> str:
       --danger: #f06c75;
     }}
     * {{ box-sizing: border-box; }}
-    body {{ margin: 0; font: 15px/1.45 Arial, sans-serif; background: radial-gradient(circle at top left, rgba(64, 205, 183, .1), transparent 34%), linear-gradient(180deg, var(--bg-soft), var(--bg) 320px); color: var(--text); }}
-    header {{ min-height: 66px; display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 0 32px; background: rgba(12, 17, 27, .9); border-bottom: 1px solid var(--line); backdrop-filter: blur(12px); }}
+    body {{ margin: 0; font: 15px/1.45 Arial, sans-serif; background: var(--bg); color: var(--text); }}
+    header {{ min-height: 60px; display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 0 32px; background: #0c111b; border-bottom: 1px solid var(--line); }}
     h1 {{ margin: 0; font-size: 20px; font-weight: 800; letter-spacing: 0; }}
     nav {{ display: flex; align-items: center; gap: 10px; }}
     nav a {{ color: var(--muted); text-decoration: none; font-weight: 700; border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; }}
     nav a:hover, nav a.active {{ color: var(--text); border-color: rgba(64, 205, 183, .55); background: rgba(64, 205, 183, .08); }}
-    main {{ max-width: 1240px; margin: 0 auto; padding: 28px 24px 40px; }}
-    .hero-panel {{ background: linear-gradient(135deg, rgba(64, 205, 183, .12), rgba(255, 193, 90, .08)), var(--surface); border: 1px solid var(--line); border-top: 4px solid var(--accent); border-radius: 8px; padding: 24px; margin-bottom: 18px; display: flex; justify-content: space-between; gap: 24px; align-items: center; }}
-    .hero-panel h2 {{ margin: 6px 0 8px; font-size: 30px; line-height: 1.12; }}
-    .hero-panel p {{ margin: 0; max-width: 650px; color: var(--muted); font-size: 17px; }}
+    main {{ max-width: 1240px; margin: 0 auto; padding: 24px 24px 40px; }}
+    .page-head {{ margin-bottom: 18px; display: flex; justify-content: space-between; gap: 24px; align-items: end; }}
+    .page-head h2 {{ margin: 4px 0 5px; font-size: 26px; line-height: 1.15; }}
+    .page-head p {{ margin: 0; max-width: 680px; color: var(--muted); font-size: 15px; }}
     .eyebrow {{ color: var(--accent); font-size: 12px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }}
-    .hero-actions {{ display: grid; gap: 10px; min-width: 230px; }}
+    .page-actions {{ display: flex; gap: 8px; align-items: center; }}
     .button-link {{ min-height: 44px; border: 1px solid var(--line); border-radius: 8px; color: var(--text); text-decoration: none; display: inline-flex; align-items: center; justify-content: center; font-weight: 800; padding: 10px 14px; background: rgba(255, 255, 255, .03); }}
     .button-link:hover {{ border-color: rgba(64, 205, 183, .55); background: rgba(64, 205, 183, .08); }}
     .button-link.primary {{ background: var(--accent); color: var(--accent-text); border-color: var(--accent); }}
@@ -513,15 +517,21 @@ def _page(title: str, active: str, body: str, status_code: int = 200) -> str:
     .metric.warn {{ border-left-color: var(--warn); }}
     .metric span {{ display: block; color: var(--muted); font-size: 13px; }}
     .metric strong {{ display: block; margin-top: 8px; font-size: 17px; overflow-wrap: anywhere; color: var(--text); }}
-    .panel {{ background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 18px; margin-bottom: 18px; box-shadow: 0 16px 36px rgba(0, 0, 0, .16); }}
+    .panel {{ background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 18px; margin-bottom: 18px; }}
     h2 {{ margin: 0 0 14px; font-size: 19px; }}
-    .actions {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }}
+    .panel-title {{ display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 14px; }}
+    .panel-title h2 {{ margin: 0; }}
+    .section-tag {{ color: var(--muted); font-size: 12px; font-weight: 700; }}
+    .actions {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }}
     button {{ width: 100%; min-height: 44px; border: 1px solid rgba(64, 205, 183, .35); border-radius: 8px; background: rgba(64, 205, 183, .12); color: var(--text); font-weight: 800; cursor: pointer; padding: 10px 12px; }}
     button:hover {{ background: var(--accent); color: var(--accent-text); border-color: var(--accent); }}
+    button:disabled {{ cursor: not-allowed; opacity: .42; background: rgba(159, 176, 200, .07); border-color: var(--line); color: var(--muted); }}
     .icon {{ margin-right: 8px; }}
-    .check-form {{ display: grid; grid-template-columns: minmax(260px, 1fr) 220px 180px; gap: 12px; align-items: center; }}
-    .range-form {{ display: grid; grid-template-columns: 150px 150px 240px minmax(180px, 1fr); gap: 12px; align-items: center; margin-bottom: 14px; }}
-    .numbers-form {{ display: grid; grid-template-columns: minmax(320px, 1fr) 240px 220px; gap: 12px; align-items: stretch; }}
+    .check-form {{ display: grid; grid-template-columns: minmax(260px, 1fr) 220px 180px; gap: 12px; align-items: end; }}
+    .range-form {{ display: grid; grid-template-columns: 150px 150px 240px minmax(180px, 1fr); gap: 12px; align-items: end; margin-bottom: 16px; }}
+    .numbers-form {{ display: grid; grid-template-columns: minmax(320px, 1fr) 240px 220px; gap: 12px; align-items: end; }}
+    .field {{ display: grid; gap: 6px; min-width: 0; }}
+    .field > span {{ color: var(--muted); font-size: 12px; font-weight: 700; }}
     input, textarea {{ border: 1px solid var(--line); border-radius: 8px; padding: 0 12px; font: inherit; background: #0b111d; color: var(--text); outline: none; }}
     input::placeholder, textarea::placeholder {{ color: #7587a3; }}
     input:focus, textarea:focus {{ border-color: var(--accent); box-shadow: 0 0 0 3px rgba(64, 205, 183, .12); }}
@@ -529,6 +539,22 @@ def _page(title: str, active: str, body: str, status_code: int = 200) -> str:
     textarea {{ min-height: 86px; padding-top: 10px; resize: vertical; }}
     .switch {{ color: var(--muted); display: flex; align-items: center; gap: 8px; font-weight: 700; }}
     .switch input {{ width: 18px; height: 18px; accent-color: var(--accent); }}
+    .status-panel {{ border-left: 4px solid var(--accent); }}
+    .status-grid {{ margin: 0; display: grid; grid-template-columns: 1.4fr repeat(3, 1fr); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }}
+    .status-grid div {{ padding: 12px 14px; background: #0b111d; border-right: 1px solid var(--line); }}
+    .status-grid div:last-child {{ border-right: 0; }}
+    .status-grid dt {{ color: var(--muted); font-size: 12px; font-weight: 700; }}
+    .status-grid dd {{ margin: 5px 0 0; color: var(--text); font-size: 18px; font-weight: 800; }}
+    .status-grid .has-errors {{ color: var(--danger); }}
+    .status-badge {{ display: inline-flex; align-items: center; gap: 7px; min-height: 28px; padding: 4px 9px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 12px; font-weight: 800; }}
+    .status-badge i {{ width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }}
+    .status-badge.active {{ color: #ffe2a3; border-color: rgba(255, 193, 90, .45); background: rgba(255, 193, 90, .08); }}
+    .status-badge.active i {{ background: var(--warn); box-shadow: 0 0 0 4px rgba(255, 193, 90, .12); }}
+    .status-badge.success {{ color: #bff4e9; border-color: rgba(64, 205, 183, .42); background: rgba(64, 205, 183, .08); }}
+    .status-badge.success i {{ background: var(--ok); }}
+    .status-badge.danger {{ color: #ffc4c8; border-color: rgba(240, 108, 117, .45); background: rgba(240, 108, 117, .08); }}
+    .status-badge.danger i {{ background: var(--danger); }}
+    .status-error {{ margin-top: 12px; border: 1px solid rgba(240, 108, 117, .35); border-radius: 8px; padding: 10px 12px; color: #ffc4c8; background: rgba(240, 108, 117, .07); overflow-wrap: anywhere; }}
     table {{ width: 100%; border-collapse: collapse; }}
     th, td {{ border-bottom: 1px solid var(--line); padding: 10px; text-align: left; vertical-align: top; }}
     th {{ color: var(--muted); font-size: 13px; background: var(--surface-strong); }}
@@ -540,12 +566,25 @@ def _page(title: str, active: str, body: str, status_code: int = 200) -> str:
     .steps div {{ border: 1px solid var(--line); border-radius: 8px; padding: 14px; display: grid; grid-template-columns: 36px 1fr; gap: 10px; align-items: start; background: #0b111d; }}
     .steps strong {{ width: 28px; height: 28px; border-radius: 8px; background: var(--accent); color: var(--accent-text); display: inline-flex; align-items: center; justify-content: center; }}
     .steps span {{ color: var(--text); }}
-    @media (max-width: 860px) {{
+    @media (max-width: 980px) {{
+      .toolbar {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+      .actions {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+      .check-form, .range-form, .numbers-form {{ grid-template-columns: 1fr 1fr; }}
+      .check-form .field, .numbers-form .field {{ grid-column: 1 / -1; }}
+    }}
+    @media (max-width: 640px) {{
       header {{ padding: 12px 16px; align-items: flex-start; flex-direction: column; }}
       main {{ padding: 16px; }}
-      .hero-panel {{ flex-direction: column; align-items: stretch; padding: 18px; }}
-      .hero-panel h2 {{ font-size: 26px; }}
+      .page-head {{ flex-direction: column; align-items: stretch; }}
+      .page-head h2 {{ font-size: 24px; }}
+      .page-actions {{ display: grid; grid-template-columns: 1fr 1fr; }}
       .toolbar, .actions, .check-form, .range-form, .numbers-form {{ grid-template-columns: 1fr; }}
+      .check-form .field, .numbers-form .field {{ grid-column: auto; }}
+      .status-grid {{ grid-template-columns: 1fr 1fr; }}
+      .status-grid div {{ border-bottom: 1px solid var(--line); }}
+      .status-grid div:nth-child(2n) {{ border-right: 0; }}
+      .status-grid div:nth-last-child(-n+2) {{ border-bottom: 0; }}
+      .section-tag {{ display: none; }}
       .steps {{ grid-template-columns: 1fr; }}
     }}
   </style>
@@ -559,5 +598,9 @@ def _page(title: str, active: str, body: str, status_code: int = 200) -> str:
     </nav>
   </header>
   <main>{body}</main>
+  <script>
+    const activeJob = document.querySelector('[data-processing-active="true"]');
+    if (activeJob) window.setTimeout(() => window.location.replace('/ui/'), 5000);
+  </script>
 </body>
 </html>"""
