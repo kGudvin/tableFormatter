@@ -13,6 +13,9 @@ from googleapiclient.errors import HttpError
 from app.sheets.schema import REVIEW_COLUMNS, SERVICE_COLUMNS, SheetSchema, find_header_row
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+WRITE_MIN_INTERVAL_SECONDS = 1.1
+_write_lock = asyncio.Lock()
+_next_write_at = 0.0
 
 
 class SheetsClient(Protocol):
@@ -69,7 +72,7 @@ class GoogleSheetsClient:
                 .execute()
             )
 
-        await _with_google_retry(lambda: asyncio.to_thread(_write))
+        await _with_google_retry(lambda: _rate_limited_write(_write))
 
     async def batch_update(self, requests: list[dict[str, Any]]) -> None:
         if not requests:
@@ -82,7 +85,7 @@ class GoogleSheetsClient:
                 .execute()
             )
 
-        await _with_google_retry(lambda: asyncio.to_thread(_update))
+        await _with_google_retry(lambda: _rate_limited_write(_update))
 
     async def spreadsheet_metadata(self) -> dict[str, Any]:
         def _read() -> dict[str, Any]:
@@ -143,7 +146,20 @@ def _find_sheet(metadata: dict[str, Any], sheet_name: str) -> dict[str, Any] | N
     )
 
 
-async def _with_google_retry[T](operation: Callable[[], Awaitable[T]], attempts: int = 5) -> T:
+async def _rate_limited_write[T](operation: Callable[[], T]) -> T:
+    global _next_write_at
+    async with _write_lock:
+        loop = asyncio.get_running_loop()
+        delay = max(0.0, _next_write_at - loop.time())
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            return await asyncio.to_thread(operation)
+        finally:
+            _next_write_at = loop.time() + WRITE_MIN_INTERVAL_SECONDS
+
+
+async def _with_google_retry[T](operation: Callable[[], Awaitable[T]], attempts: int = 7) -> T:
     delay = 2.0
     for attempt in range(1, attempts + 1):
         try:
@@ -152,8 +168,10 @@ async def _with_google_retry[T](operation: Callable[[], Awaitable[T]], attempts:
             status = getattr(exc.resp, "status", None)
             if status not in {429, 500, 502, 503, 504} or attempt == attempts:
                 raise
-            await asyncio.sleep(delay + random.uniform(0, 0.5))
-            delay *= 2
+            retry_after = exc.resp.get("retry-after")
+            wait = float(retry_after) if retry_after else delay + random.uniform(0, 0.5)
+            await asyncio.sleep(wait)
+            delay = min(delay * 2, 60.0)
     raise RuntimeError("Google Sheets retry loop exhausted")
 
 
